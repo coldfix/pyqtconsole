@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-from threading import Condition
+try:
+    from queue import Queue
+except ImportError:
+    from Queue import Queue
 from .qt import QtCore
 
 class Stream(QtCore.QObject):
@@ -9,62 +12,24 @@ class Stream(QtCore.QObject):
 
     def __init__(self):
         super(Stream, self).__init__()
-        self._line_cond = Condition()
-        self._buffer = ''
+        self._queue = Queue()
 
     def _reset_buffer(self):
-        data = self._buffer
-        self._buffer = ''
-        return data
+        with self._queue.mutex:
+            data = ''.join(self._queue.queue)
+            self._queue.queue.clear()
+            return data
 
     def _flush(self):
-        with self._line_cond:
-            data = self._reset_buffer()
-            self._line_cond.notify()
-
+        data = self._reset_buffer()
+        self._queue.put('')
         return data
 
     def readline(self, timeout = None):
-        data = ''
-
-        try:
-            with self._line_cond:
-                first_linesep = self._buffer.find('\n')
-
-                # Is there already some lines in the buffer, write might have
-                # been called before we read !
-                while first_linesep == -1:
-                    notfied = self._line_cond.wait(timeout)
-                    first_linesep = self._buffer.find('\n')
-
-                    # We had a timeout, break !
-                    if not notfied:
-                        break
-
-                # Check if there really is something in the buffer after waiting
-                # for line_cond. There might have been a timeout, and there is
-                # still no data available
-                if first_linesep > -1:
-                    data = self._buffer[0:first_linesep+1]
-
-                    if len(self._buffer) > len(data):
-                        self._buffer = self._buffer[first_linesep+1:]
-                    else:
-                        self._buffer = ''
-
-        # Tricky RuntimeError !, wait releases the lock and waits for notify
-        # and then acquire the lock again !. There might be an exception, i.e
-        # KeyboardInterupt which interrupts the wait. The cleanup of the with
-        # statement then tries to release the lock which is not acquired,
-        # causing a RuntimeError. puh ! If its the case just try again !
-        except RuntimeError:
-            data = self.readline(timeout)
-
-        return data
+        return self._queue.get(block=timeout != 0, timeout=timeout)
 
     def write(self, data):
-        with self._line_cond:
-            self._buffer += data
+        with self._queue.mutex:
 
             if '\n' in self._buffer:
                 self._line_cond.notify()
