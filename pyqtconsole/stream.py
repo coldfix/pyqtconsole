@@ -24,7 +24,7 @@ class Stream(QtCore.QObject):
 
         return data
 
-    def readline(self, timeout = None):
+    def readline(self, block=True):
         data = ''
 
         try:
@@ -34,7 +34,7 @@ class Stream(QtCore.QObject):
                 # Is there already some lines in the buffer, write might have
                 # been called before we read !
                 while first_linesep == -1:
-                    notfied = self._line_cond.wait(timeout)
+                    notfied = self._line_cond.wait(None if block else 0)
                     first_linesep = self._buffer.find('\n')
 
                     # We had a timeout, break !
@@ -58,7 +58,7 @@ class Stream(QtCore.QObject):
         # statement then tries to release the lock which is not acquired,
         # causing a RuntimeError. puh ! If its the case just try again !
         except RuntimeError:
-            data = self.readline(timeout)
+            data = self.readline(block)
 
         return data
 
