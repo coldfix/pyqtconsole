@@ -76,8 +76,8 @@ class PythonInterpreter(InteractiveConsole):
         self._executing = False        
         return exec_res
 
-    def raw_input(self, prompt=None, timeout=None):
-        line = self.stdin.readline(timeout)
+    def raw_input(self, prompt=None, block=True):
+        line = self.stdin.readline(block)
 
         if line != '\n':
             line = line.strip('\n')
@@ -129,7 +129,7 @@ class PythonInterpreter(InteractiveConsole):
 
         while self._running:
             try:
-                line = self.raw_input(timeout = None)
+                line = self.raw_input(block=True)
 
                 if line:
                     self._rep_line(line)
@@ -145,7 +145,7 @@ class PythonInterpreter(InteractiveConsole):
         self._print_in_prompt()
 
     def repl_nonblock(self):
-        line = self.raw_input(timeout = 0)
+        line = self.raw_input(block=False)
 
         if line:
             self._rep_line(line)
