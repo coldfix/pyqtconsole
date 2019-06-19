@@ -5,7 +5,7 @@ from abc import abstractmethod
 
 from .qt.QtCore import Qt, Signal, QThread, Slot, QEvent
 from .qt.QtWidgets import QPlainTextEdit, QApplication, QHBoxLayout, QFrame
-from .qt.QtGui import QFontMetrics, QTextCursor, QClipboard
+from .qt.QtGui import QFontMetrics, QTextCursor, QClipboard, QTextDocument
 
 from .interpreter import PythonInterpreter
 from .stream import Stream
@@ -40,6 +40,10 @@ class BaseConsole(QFrame):
         self.edit = edit = InputArea()
         self.pbar = pbar = PromptArea(
             edit, self._get_prompt_text, PromptHighlighter(formats=formats))
+
+        self._document = QTextDocument(self)
+        self._document.contentsChanged.connect(self._input_changed)
+        self._document.cursorPositionChanged.connect(self._cursor_changed)
 
         layout = QHBoxLayout()
         layout.addWidget(pbar)
@@ -115,11 +119,23 @@ class BaseConsole(QFrame):
         else:
             return False
 
+    def undo(self):
+        self._document.undo()
+
+    def redo(self):
+        self._document.redo()
+
     def _textCursor(self):
         return self.edit.textCursor()
 
     def _setTextCursor(self, cursor):
         self.edit.setTextCursor(cursor)
+
+    def _inputCursor(self):
+        return self._document.textCursor()
+
+    def _setInputCursor(self):
+        return self._document.textCursor()
 
     def ensureCursorVisible(self):
         self.edit.ensureCursorVisible()
@@ -168,6 +184,8 @@ class BaseConsole(QFrame):
             Qt.Key_D:           self._handle_d_key,
             Qt.Key_C:           self._handle_c_key,
             Qt.Key_V:           self._handle_v_key,
+            Qt.Key_Z:           self._handle_z_key,
+            Qt.Key_Y:           self._handle_y_key,
         }
 
     def insertFromMimeData(self, mime_data):
@@ -207,9 +225,9 @@ class BaseConsole(QFrame):
         if event.modifiers() & Qt.ShiftModifier:
             self.insert_input_text('\n')
         else:
-            cursor = self._textCursor()
+            cursor = self._inputCursor()
             cursor.movePosition(QTextCursor.End)
-            self._setTextCursor(cursor)
+            self._setInputCursor(cursor)
             buffer = self.input_buffer()
             self.insert_input_text('\n', show_ps=False)
             self.process_input(buffer)
@@ -217,7 +235,7 @@ class BaseConsole(QFrame):
 
     def _handle_backspace_key(self, event):
         self._keep_cursor_in_buffer()
-        cursor = self._textCursor()
+        cursor = self._inputCursor()
         offset = self.cursor_offset()
         if not cursor.hasSelection() and offset >= 1:
             tab = self._tab_chars
@@ -239,7 +257,7 @@ class BaseConsole(QFrame):
 
     def _handle_delete_key(self, event):
         self._keep_cursor_in_buffer()
-        cursor = self._textCursor()
+        cursor = self._inputCursor()
         offset = self.cursor_offset()
         if not cursor.hasSelection() and offset < len(self.input_buffer()):
             tab = self._tab_chars
@@ -261,9 +279,9 @@ class BaseConsole(QFrame):
         return True
 
     def _handle_tab_key(self, event):
-        cursor = self._textCursor()
+        cursor = self._inputCursor()
         if cursor.hasSelection():
-            self._setTextCursor(self._indent_selection(cursor))
+            self._setInputCursor(self._indent_selection(cursor))
         else:
             # add spaces until next tabstop boundary:
             tab = self._tab_chars
@@ -274,7 +292,7 @@ class BaseConsole(QFrame):
         return True
 
     def _handle_backtab_key(self, event):
-        self._setTextCursor(self._indent_selection(self._textCursor(), False))
+        self._setInputCursor(self._indent_selection(self._inputCursor(), False))
         return True
 
     def _indent_selection(self, cursor, indent=True):
@@ -360,8 +378,20 @@ class BaseConsole(QFrame):
             return True
         return False
 
+    def _handle_z_key(self, event):
+        if event.modifiers() == Qt.ControlModifier:
+            self.undo()
+            return True
+        return False
+
+    def _handle_y_key(self, event):
+        if event.modifiers() == Qt.ControlModifier:
+            self.redo()
+            return True
+        return False
+
     def _move_cursor(self, position, select=False):
-        cursor = self._textCursor()
+        cursor = self._inputCursor()
         mode = QTextCursor.KeepAnchor if select else QTextCursor.MoveAnchor
         if isinstance(position, QTextCursor.MoveOperation):
             cursor.movePosition(position, mode)
@@ -402,11 +432,11 @@ class BaseConsole(QFrame):
 
     def input_buffer(self):
         """Retrieve current input buffer in string form."""
-        return self.edit.toPlainText()[self._prompt_pos:]
+        return self._document.toPlainText()
 
     def cursor_offset(self):
         """Get current cursor index within input buffer."""
-        return self._textCursor().position() - self._prompt_pos
+        return self._inputCursor().position()
 
     def _get_line_until_cursor(self):
         """Get current line of input buffer, up to cursor position."""
@@ -418,8 +448,8 @@ class BaseConsole(QFrame):
 
     def clear_input_buffer(self):
         """Clear input buffer."""
-        cursor = self._textCursor()
-        cursor.setPosition(self._prompt_pos)
+        cursor = self._inputCursor()
+        cursor.movePosition(QTextCursor.Start)
         cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
         self._remove_selected_input(cursor)
         self._setTextCursor(cursor)
@@ -479,6 +509,21 @@ class BaseConsole(QFrame):
         if len(self._copy_buffer) > 0:
             self.insert_input_text(self._copy_buffer)
             self._copy_buffer = ''
+
+    def _input_changed(self, position, removed, added):
+        offset = self._prompt_pos
+        cursor = self._textCursor()
+        cursor.setPosition(offset + position)
+        cursor.setPosition(offset + position + removed, QTextCursor.KeepAnchor)
+        cursor.insertText(
+            self._document.toPlainText()[position:position+added])
+
+    def _cursor_changed(self, vcursor):
+        offset = self._prompt_pos
+        cursor = self._textCursor()
+        cursor.setPosition(offset + vcursor.anchor())
+        cursor.setPosition(offset + vcursor.position(), QTextCursor.KeepAnchor)
+        self._setTextCursor(cursor)
 
     def _insert_prompt_text(self, text):
         lines = text.split('\n')
