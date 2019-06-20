@@ -2,6 +2,7 @@
 import threading
 import ctypes
 from abc import abstractmethod
+from collections import namedtuple
 
 from .qt.QtCore import Qt, Signal, QThread, Slot, QEvent
 from .qt.QtWidgets import QPlainTextEdit, QApplication, QHBoxLayout, QFrame
@@ -13,6 +14,7 @@ from .highlighter import PythonHighlighter, PromptHighlighter
 from .commandhistory import CommandHistory
 from .autocomplete import AutoComplete, COMPLETE_MODE
 from .prompt import PromptArea
+from .log import Log
 
 try:
     import jedi
@@ -26,6 +28,13 @@ try:                        # PyQt >= 5.11
     QueuedConnection = Qt.ConnectionType.QueuedConnection
 except AttributeError:      # PyQt < 5.11
     QueuedConnection = Qt.QueuedConnection
+
+
+class LogRecord(namedtuple('LogRecord', ['domain', 'prompt', 'text'])):
+
+    @property
+    def num_lines(self):
+        return self.prompt.count('\n')
 
 
 class BaseConsole(QFrame):
@@ -48,21 +57,16 @@ class BaseConsole(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
-        self._prompt_doc = ['']
+        self._log = Log()
         self._prompt_pos = 0
-        self._output_inserted = False
+        self._prompt_end = 0
         self._tab_chars = 4 * ' '
         self._ctrl_d_exits = False
-        self._copy_buffer = ''
-
-        self._last_input = ''
-        self._more = False
         self._current_line = 0
 
         self._ps1 = 'IN [%s]: '
         self._ps2 = '...: '
         self._ps_out = 'OUT[%s]: '
-        self._ps = self._ps1 % self._current_line
 
         self.stdin = Stream()
         self.stdout = Stream()
@@ -124,33 +128,32 @@ class BaseConsole(QFrame):
     def ensureCursorVisible(self):
         self.edit.ensureCursorVisible()
 
-    def _update_ps(self, _more):
-        # We need to show the more prompt of the input was incomplete
-        # If the input is complete increase the input number and show
-        # the in prompt
-        if not _more:
-            self._ps = self._ps1 % self._current_line
-        else:
-            self._ps = (len(self._ps) - len(self._ps2)) * ' ' + self._ps2
+    def append(self, domain, prompt, text):
+        ins_newline = '\n' if (
+            len(self._log) > 0 and
+            not self._log[-1].text.endswith('\n')) else ''
+        self._log.append(
+            LogRecord(domain, prompt, text))
+        cursor = self._textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(ins_newline + text)
+        self._setTextCursor(cursor)
+        self.ensureCursorVisible()
+        self.pbar.adjust_width(prompt)
 
     @Slot(bool, object)
     def _finish_command(self, executed, result):
         if result is not None:
-            self._insert_output_text(
-                repr(result),
-                prompt=self._ps_out % self._current_line)
-            self._insert_output_text('\n')
-
+            self.append('OUT', self._ps_out % self._current_line, repr(result))
         if executed and self._last_input:
             self._current_line += 1
-        self._more = False
-        self._update_ps(self._more)
         self._show_ps()
 
     def _show_ps(self):
-        if self._output_inserted and not self._more:
-            self._insert_output_text("\n")
-        self._insert_prompt_text(self._ps)
+        if len(self._log) > 0 and self._log[-1].domain != 'IN':
+            self.append('', '\n', '\n')
+        ps = self._ps1 % self._current_line
+        self.append('IN', ps + '\n', '')
 
     def _get_key_event_handlers(self):
         return {
@@ -208,10 +211,9 @@ class BaseConsole(QFrame):
             self.insert_input_text('\n')
         else:
             cursor = self._textCursor()
-            cursor.movePosition(QTextCursor.End)
+            cursor.setPosition(self._prompt_end)
             self._setTextCursor(cursor)
             buffer = self.input_buffer()
-            self.insert_input_text('\n', show_ps=False)
             self.process_input(buffer)
         return True
 
@@ -337,7 +339,6 @@ class BaseConsole(QFrame):
                     "\nCan't use CTRL-D to exit, you have to exit the "
                     "application !\n")
                 self._more = False
-                self._update_ps(False)
                 self._show_ps()
             return True
 
@@ -372,27 +373,16 @@ class BaseConsole(QFrame):
 
     def _keep_cursor_in_buffer(self):
         cursor = self._textCursor()
-        if cursor.anchor() < self._prompt_pos:
-            cursor.setPosition(self._prompt_pos)
-        if cursor.position() < self._prompt_pos:
-            cursor.setPosition(self._prompt_pos, QTextCursor.KeepAnchor)
+        anchor = max(min(cursor.anchor(), self._prompt_end), self._prompt_pos)
+        position = max(min(cursor.position(), self._prompt_end), self._prompt_pos)
+        cursor.setPosition(anchor)
+        cursor.setPosition(position, QTextCursor.KeepAnchor)
         self._setTextCursor(cursor)
         self.ensureCursorVisible()
 
-    def _insert_output_text(self, text, lf=False, keep_buffer=False, prompt=''):
-        if keep_buffer:
-            self._copy_buffer = self.input_buffer()
-
-        cursor = self._textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(text)
-        self._prompt_pos = cursor.position()
-        self.ensureCursorVisible()
-
-        self._insert_prompt_text(prompt + '\n' * text.count('\n'))
-        self._output_inserted = True
-        if lf:
-            self.process_input('')
+    def _insert_output_text(self, text, prompt=''):
+        self.append('OUT', prompt + '\n' * text.count('\n'), text)
+        self.update_prompt_pos()
 
     def _update_prompt_pos(self):
         cursor = self._textCursor()
@@ -432,16 +422,6 @@ class BaseConsole(QFrame):
         self._remove_selected_input(self._textCursor())
         self._textCursor().insertText(text)
 
-        if show_ps and '\n' in text:
-            self._update_ps(True)
-            for _ in range(text.count('\n')):
-                # NOTE: need to insert in two steps, because this internally
-                # uses setAlignment, which affects only the first line:
-                self._insert_prompt_text('\n')
-                self._insert_prompt_text(self._ps)
-        elif '\n' in text:
-            self._insert_prompt_text('\n' * text.count('\n'))
-
     def set_auto_complete_mode(self, mode):
         if self.auto_complete:
             self.auto_complete.mode = mode
@@ -450,7 +430,6 @@ class BaseConsole(QFrame):
         """Handle a new source snippet confirmed by the user."""
         self._last_input = source
         self._more = self._run_source(source)
-        self._update_ps(self._more)
         if self._more:
             self._show_ps()
         else:
@@ -470,25 +449,17 @@ class BaseConsole(QFrame):
             self.stdout.write('^C\n')
             self._output_inserted = False
             self._more = False
-            self._update_ps(self._more)
             self._show_ps()
 
     def _stdout_data_handler(self, data):
-        self._insert_output_text(data)
-
-        if len(self._copy_buffer) > 0:
-            self.insert_input_text(self._copy_buffer)
-            self._copy_buffer = ''
-
-    def _insert_prompt_text(self, text):
-        lines = text.split('\n')
-        self._prompt_doc[-1] += lines[0]
-        self._prompt_doc += lines[1:]
-        for line in self._prompt_doc[-len(lines):]:
-            self.pbar.adjust_width(line)
+        num_lines = data.count('\n') + (not data.endswith('\n'))
+        self.append('STDOUT', '\n' * num_lines, data)
 
     def _get_prompt_text(self, line_number):
-        return self._prompt_doc[line_number]
+        record_index = self._log.linenos.find_loc(line_number)
+        record_line = self._log.linenos[record_index]
+        record = self._log.records[record_index]
+        return record.prompt.split('\n')[line_number + 1 - record_line]
 
     def _remove_selected_input(self, cursor):
         if not cursor.hasSelection():

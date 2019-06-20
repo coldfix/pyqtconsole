@@ -115,8 +115,7 @@ class AutoComplete(QObject):
             self.completer.complete(cr)
         elif self.mode == COMPLETE_MODE.INLINE:
             cl = columnize(words, colsep = '  |  ')
-            self.parent()._insert_output_text(
-                '\n\n' + cl + '\n', lf=True, keep_buffer=True)
+            self.parent()._insert_output_text('\n\n' + cl + '\n')
 
     def hide_completion_suggestions(self):
         if self.completing():
